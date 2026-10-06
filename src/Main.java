@@ -4,534 +4,221 @@ import java.nio.file.*;
 import java.util.*;
 
 public class Main {
-    static final byte KEEP = 0;
-    static final byte DELETE = 1;
-    static final byte INSERT = 2;
+    // Sequences being compared, the result marks, and Myers' V arrays (forward / backward).
+    static int[] A, B, vf, vb;
+    static boolean[] del, ins;
 
-    static class Line {
-        byte[] data;
-        int start;
-        int end;
-
-        Line(byte[] data, int start, int end) {
-            this.data = data;
-            this.start = start;
-            this.end = end;
+    // Line diff. A line that never occurs in the other file can't be matched, so it is
+    // deleted/inserted directly and Myers runs only on the rest (still minimal, much faster).
+    static boolean[][] lineDiff(int[] a, int[] b, int idCount) {
+        boolean[] inA = new boolean[idCount], 
+        inB = new boolean[idCount];
+        for (int x : a){
+            inA[x] = true;
+        } 
+        for (int x : b){ 
+            inB[x] = true;
         }
+        int[] ka = keep(a, inB), 
+        kb = keep(b, inA);   // indices of lines worth diffing
 
-        int length() {
-            return end - start;
+        int[] sa = new int[ka.length], 
+        sb = new int[kb.length];
+
+        for (int i = 0; i < ka.length; i++) {
+            sa[i] = a[ka[i]];
         }
+        for (int j = 0; j < kb.length; j++){ 
+            sb[j] = b[kb[j]];
+        }
+        boolean[][] r = diff(sa, sb);
+        boolean[] dl = new boolean[a.length], 
+        in = new boolean[b.length];
+
+        Arrays.fill(dl, true);
+        Arrays.fill(in, true);
+
+        for (int i = 0; i < ka.length; i++){ 
+            dl[ka[i]] = r[0][i];
+        }
+        for (int j = 0; j < kb.length; j++) {
+            in[kb[j]] = r[1][j];
+        }
+        return new boolean[][]{dl, in};
     }
 
-    static class Edit {
-        byte type;
-        Line line;
-
-        Edit(byte type, Line line) {
-            this.type = type;
-            this.line = line;
+    static int[] keep(int[] s, boolean[] inOther) {
+        int c = 0;
+        for (int x : s){ 
+            if (inOther[x]){
+                c++;
+            } 
         }
-    }
-
-    static class CharEdit {
-        byte type;
-        int value;
-
-        CharEdit(byte type, int value) {
-            this.type = type;
-            this.value = value;
-        }
-    }
-
-    static byte[] readFile(String path) throws IOException {
-        return Files.readAllBytes(Path.of(path));
-    }
-
-    static List<Line> splitLines(byte[] data) {
-        List<Line> lines = new ArrayList<>();
-        int start = 0;
-
-        for (int i = 0; i < data.length; i++) {
-            if (data[i] == '\n') {
-                lines.add(new Line(data, start, i));
-                start = i + 1;
+        int[] idx = new int[c];
+        c = 0;
+        for (int i = 0; i < s.length; i++) {
+            if (inOther[s[i]]) {
+                idx[c++] = i;
             }
         }
-
-        if (start < data.length) {
-            lines.add(new Line(data, start, data.length));
-        }
-
-        return lines;
+        return idx;
     }
 
-    static boolean sameLine(Line a, Line b) {
-        int lenA = a.length();
-        int lenB = b.length();
+    // Minimal diff of a -> b. Returns {del, ins}: del[i] = a[i] deleted, ins[j] = b[j] inserted.
+    static boolean[][] diff(int[] a, int[] b) {
+        A = a; B = b;
+        del = new boolean[a.length];
+        ins = new boolean[b.length];
+        vf = new int[a.length + b.length + 5];
+        vb = new int[a.length + b.length + 5];
+        solve(0, a.length, 0, b.length);
+        return new boolean[][]{del, ins};
+    }
 
-        if (lenA != lenB) {
-            return false;
+    // Linear-space Myers: strip common prefix/suffix, split at a point on a shortest path, recurse.
+    static void solve(int x0, int x1, int y0, int y1) {
+        while (x0 < x1 && y0 < y1 && A[x0] == B[y0]) { 
+            x0++; y0++; 
         }
-
-        for (int i = 0; i < lenA; i++) {
-            if (a.data[a.start + i] != b.data[b.start + i]) {
-                return false;
+        while (x0 < x1 && y0 < y1 && A[x1 - 1] == B[y1 - 1]) { 
+            x1--; y1--; 
+        }
+        if (x0 == x1 || y0 == y1) {
+            for (int i = x0; i < x1; i++) {
+                del[i] = true;
             }
-        }
-
-        return true;
-    }
-
-    static int[] findCommonPart(List<Line> oldLines, List<Line> newLines) {
-        int oldSize = oldLines.size();
-        int newSize = newLines.size();
-
-        int prefix = 0;
-
-        while (prefix < oldSize && prefix < newSize &&
-                sameLine(oldLines.get(prefix), newLines.get(prefix))) {
-            prefix++;
-        }
-
-        int suffix = 0;
-
-        while (suffix < oldSize - prefix &&
-                suffix < newSize - prefix &&
-                sameLine(
-                        oldLines.get(oldSize - 1 - suffix),
-                        newLines.get(newSize - 1 - suffix))) {
-            suffix++;
-        }
-
-        return new int[]{prefix, suffix};
-    }
-
-    static List<Edit> lineDiff(List<Line> oldLines, List<Line> newLines) {
-        int oldSize = oldLines.size();
-        int newSize = newLines.size();
-
-        int[] common = findCommonPart(oldLines, newLines);
-        int prefix = common[0];
-        int suffix = common[1];
-
-        List<Edit> result = new ArrayList<>(oldSize + newSize);
-
-        for (int i = 0; i < prefix; i++) {
-            result.add(new Edit(KEEP, oldLines.get(i)));
-        }
-
-        int oldStart = prefix;
-        int oldEnd = oldSize - suffix;
-        int newStart = prefix;
-        int newEnd = newSize - suffix;
-
-        int oldCount = oldEnd - oldStart;
-        int newCount = newEnd - newStart;
-
-        if (oldCount == 0) {
-            for (int i = newStart; i < newEnd; i++) {
-                result.add(new Edit(INSERT, newLines.get(i)));
+            for (int j = y0; j < y1; j++) {
+                ins[j] = true;
             }
-        } else if (newCount == 0) {
-            for (int i = oldStart; i < oldEnd; i++) {
-                result.add(new Edit(DELETE, oldLines.get(i)));
-            }
-        } else {
-            result.addAll(solveMiddle(oldLines,newLines,oldStart,oldEnd,newStart,newEnd));
+            return;
         }
-
-        for (int i = oldSize - suffix; i < oldSize; i++) {
-            result.add(new Edit(KEEP, oldLines.get(i)));
-        }
-
-        return result;
+        int[] mid = middle(x0, x1, y0, y1);
+        solve(x0, mid[0], y0, mid[1]);
+        solve(mid[0], x1, mid[1], y1);
     }
 
-    static List<Edit> solveMiddle(List<Line> oldLines,List<Line> newLines,int oldStart,int oldEnd,int newStart,int newEnd) {
-        int n = oldEnd - oldStart;
-        int m = newEnd - newStart;
-        int max = n + m;
-        int offset = max;
-
-        int[] v = new int[2 * max + 1];
-        List<int[]> history = new ArrayList<>();
-
-        int finalD = 0;
-        boolean found = false;
-
-        for (int d = 0; d <= max && !found; d++) {
+    // Middle snake: run Myers forward from the start and backward from the end at the same time.
+    // vf[k] = furthest x on diagonal k = x - y going forward; vb[c] = the same going backward
+    // (measured from the end). When they meet, that point lies on a shortest edit path.
+    static int[] middle(int x0, int x1, int y0, int y1) {
+        int n = x1 - x0, m = y1 - y0, delta = n - m, off = (n + m + 1) / 2 + 1;
+        boolean odd = (delta & 1) != 0;
+        vf[off + 1] = 0;
+        vb[off + 1] = 0;
+        for (int d = 0; ; d++) {
             for (int k = -d; k <= d; k += 2) {
-                int x;
-
-                if (k == -d || (k != d && v[offset + k - 1] < v[offset + k + 1])) {
-                    x = v[offset + k + 1];
-
-                } else {
-                    x = v[offset + k - 1] + 1;
-                }
-
+                int x = (k == -d || (k != d && vf[off + k - 1] < vf[off + k + 1]))
+                        ? vf[off + k + 1]          // step down (insert)
+                        : vf[off + k - 1] + 1;     // step right (delete)
                 int y = x - k;
-                while (x < n && y < m &&
-                        sameLine(oldLines.get(oldStart + x),newLines.get(newStart + y))) {
-                    x++;
-                    y++;
-                }
-
-                v[offset + k] = x;
-                if (x >= n && y >= m) {
-                    finalD = d;
-                    found = true;
-                    break;
-                }
+                while (x < n && y < m && A[x0 + x] == B[y0 + y]) { x++; y++; }  // follow snake
+                vf[off + k] = x;
+                int c = delta - k;
+                if (odd && c >= 1 - d && c <= d - 1 && x + vb[off + c] >= n)
+                    return new int[]{x0 + x, y0 + y};
             }
-
-            history.add(v.clone());
+            for (int c = -d; c <= d; c += 2) {
+                int x = (c == -d || (c != d && vb[off + c - 1] < vb[off + c + 1]))
+                        ? vb[off + c + 1]
+                        : vb[off + c - 1] + 1;
+                int y = x - c;
+                while (x < n && y < m && A[x1 - 1 - x] == B[y1 - 1 - y]) { x++; y++; }
+                vb[off + c] = x;
+                int k = delta - c;
+                if (!odd && k >= -d && k <= d && x + vf[off + k] >= n)
+                    return new int[]{x1 - x, y1 - y};
+            }
         }
-
-        return backtrack(oldLines,newLines,oldStart,newStart,history,finalD,offset,n,m);
     }
 
-    static List<Edit> backtrack(List<Line> oldLines,List<Line> newLines,int oldStart,int newStart,List<int[]> history,int finalD,int offset,int n,int m) {
-        List<Edit> result = new ArrayList<>(n + m);
-        int x = n;
-        int y = m;
+    // A file split into lines: line i is data[st[i] .. en[i]).
+    static class Lines {
+        byte[] data; int[] st, en, id; int n;
 
-        for (int d = finalD; d > 0; d--) {
-            int[] previous = history.get(d - 1);
-            int k = x - y;
-            int previousK;
-
-            if (k == -d || (k != d && previous[offset + k - 1] < previous[offset + k + 1])) {
-                previousK = k + 1;
-            } else {
-                previousK = k - 1;
-            }
-
-            int previousX = previous[offset + previousK];
-            int previousY = previousX - previousK;
-
-            while (x > previousX && y > previousY) {
-                result.add(new Edit(KEEP, oldLines.get(oldStart + x - 1)));
-                x--;
-                y--;
-            }
-
-            if (x == previousX) {
-                result.add(new Edit(INSERT,newLines.get(newStart + y - 1)));
-                y--;
-            } else {
-                result.add( new Edit(DELETE,oldLines.get(oldStart + x - 1)));
-                x--;
-            }
-        }
-
-        while (x > 0 && y > 0) {
-            result.add(new Edit(KEEP,oldLines.get(oldStart + x - 1)));
-            x--;
-            y--;
-        }
-
-        Collections.reverse(result);
-        return result;
-    }
-
-    static List<Edit> orderChanges(List<Edit> edits) {
-        List<Edit> result = new ArrayList<>(edits.size());
-        int i = 0;
-
-        while (i < edits.size()) {
-            if (edits.get(i).type == KEEP) {
-                result.add(edits.get(i));
-                i++;
-                continue;
-            }
-
-            int start = i;
-
-            while (i < edits.size() && edits.get(i).type != KEEP) {
-                i++;
-            }
-
-            int end = i;
-
-            for (int j = start; j < end; j++) {
-                if (edits.get(j).type == DELETE) {
-                    result.add(edits.get(j));
-                }
-            }
-
-            for (int j = start; j < end; j++) {
-                if (edits.get(j).type == INSERT) {
-                    result.add(edits.get(j));
+        Lines(byte[] d, Map<String, Integer> ids) {
+            data = d;
+            int cnt = 0;
+            for (byte b : d) if (b == '\n') cnt++;
+            if (d.length > 0 && d[d.length - 1] != '\n') cnt++;
+            st = new int[cnt]; en = new int[cnt]; id = new int[cnt];
+            int s = 0;
+            for (int i = 0; i <= d.length; i++) {
+                if (i == d.length ? s < i : d[i] == '\n') {
+                    st[n] = s; en[n] = i;
+                    // equal byte content -> equal id, so the diff compares ints instead of bytes
+                    id[n] = ids.computeIfAbsent(new String(d, s, i - s, StandardCharsets.ISO_8859_1), x -> ids.size());
+                    n++;
+                    s = i + 1;
                 }
             }
         }
 
-        return result;
-    }
-
-    static void writeLine(BufferedOutputStream out, byte prefix, Line line)
-            throws IOException {
-        out.write(prefix);
-        out.write(line.data, line.start, line.length());
-        out.write('\n');
-    }
-
-    static void printLines(List<Edit> edits) throws IOException {
-        BufferedOutputStream out =
-                new BufferedOutputStream(System.out, 64 * 1024);
-
-        for (Edit edit : edits) {
-            if (edit.type == KEEP) {
-                writeLine(out, (byte) ' ', edit.line);
-            } else if (edit.type == DELETE) {
-                writeLine(out, (byte) '-', edit.line);
-            } else {
-                writeLine(out, (byte) '+', edit.line);
-            }
+        void write(OutputStream out, char prefix, int i) throws IOException {
+            out.write(prefix);
+            out.write(data, st[i], en[i] - st[i]);
+            out.write('\n');
         }
 
-        out.flush();
+        int[] codePoints(int i) {
+            return new String(data, st[i], en[i] - st[i], StandardCharsets.UTF_8).codePoints().toArray();
+        }
     }
 
-    static List<CharEdit> characterDiff(int[] oldText, int[] newText) {
-        int n = oldText.length;
-        int m = newText.length;
-        int max = n + m;
-        int offset = max;
-
-        int[] v = new int[2 * max + 1];
-        List<int[]> history = new ArrayList<>();
-
-        for (int d = 0; d <= max; d++) {
-            for (int k = -d; k <= d; k += 2) {
-                int x;
-
-                if (k == -d || (k != d && v[offset + k - 1] < v[offset + k + 1])) {
-                    x = v[offset + k + 1];
-                } else {
-                    x = v[offset + k - 1] + 1;
-                }
-                int y = x - k;
-                while (x < n && y < m && oldText[x] == newText[y]) {
-                    x++;
-                    y++;
-                }
-                v[offset + k] = x;
-                if (x >= n && y >= m) {
-                    history.add(v.clone());
-                    return backtrackCharacters(oldText, newText,history,d, offset);
-                }
-            }
-
-            history.add(v.clone());
+    // "3-5,9-12" for the runs of true in marks, or "." if none.
+    static String ranges(boolean[] marks) {
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < marks.length; i++) {
+            if (!marks[i]) continue;
+            int s = i;
+            while (i < marks.length && marks[i]) i++;
+            if (sb.length() > 0) sb.append(',');
+            sb.append(s).append('-').append(i);
         }
-
-        return new ArrayList<>();
+        return sb.length() == 0 ? "." : sb.toString();
     }
 
-    static List<CharEdit> backtrackCharacters(int[] oldText,int[] newText, List<int[]> history, int finalD,int offset) {
-        List<CharEdit> result = new ArrayList<>();
-        int x = oldText.length;
-        int y = newText.length;
-
-        for (int d = finalD; d > 0; d--) {
-            int[] previous = history.get(d - 1);
-            int k = x - y;
-            int previousK;
-
-            if (k == -d ||(k != d && previous[offset + k - 1] < previous[offset + k + 1])) {
-                previousK = k + 1;
-            } else {
-                previousK = k - 1;
-            }
-
-            int previousX = previous[offset + previousK];
-            int previousY = previousX - previousK;
-
-            while (x > previousX && y > previousY) {
-                result.add(new CharEdit(KEEP,oldText[x - 1]));
-                x--;
-                y--;
-            }
-
-            if (x == previousX) {
-                result.add(new CharEdit(INSERT,newText[y - 1]));
-                y--;
-            } else {
-                result.add(new CharEdit(DELETE,oldText[x - 1]));
-                x--;
-            }
-        }
-
-        while (x > 0 && y > 0) {
-            result.add( new CharEdit(KEEP,oldText[x - 1]) );
-            x--;
-            y--;
-        }
-
-        Collections.reverse(result);
-        return result;
-    }
-
-    static String changedRanges(List<CharEdit> edits) {
-        List<int[]> oldRanges = new ArrayList<>();
-        List<int[]> newRanges = new ArrayList<>();
-
-        int oldIndex = 0;
-        int newIndex = 0;
-        int oldStart = -1;
-        int newStart = -1;
-
-        for (CharEdit edit : edits) {
-            if (edit.type == KEEP) {
-                if (oldStart != -1) {
-                    oldRanges.add(new int[]{oldStart, oldIndex});
-                    oldStart = -1;
-                }
-
-                if (newStart != -1) {
-                    newRanges.add(new int[]{newStart, newIndex});
-                    newStart = -1;
-                }
-
-                oldIndex++;
-                newIndex++;
-            } else if (edit.type == DELETE) {
-                if (oldStart == -1) {
-                    oldStart = oldIndex;
-                }
-                oldIndex++;
-            } else {
-                if (newStart == -1) {
-                    newStart = newIndex;
-                }
-                newIndex++;
-            }
-        }
-
-        if (oldStart != -1) {
-            oldRanges.add(new int[]{oldStart, oldIndex});
-        }
-
-        if (newStart != -1) {
-            newRanges.add(new int[]{newStart, newIndex});
-        }
-
-        return formatRanges(oldRanges) + " | " + formatRanges(newRanges);
-    }
-
-    static String formatRanges(List<int[]> ranges) {
-        if (ranges.isEmpty()) {
-            return ".";
-        }
-
-        StringBuilder result = new StringBuilder();
-
-        for (int i = 0; i < ranges.size(); i++) {
-            if (i > 0) {
-                result.append(",");
-            }
-
-            result.append(ranges.get(i)[0])
-                    .append("-")
-                    .append(ranges.get(i)[1]);
-        }
-
-        return result.toString();
-    }
-
-    static String lineText(Line line) {
-        return new String(line.data,line.start,line.length(),StandardCharsets.UTF_8);
-    }
-
-    static String highlightFor(Line oldLine, Line newLine) {
-        String oldText = lineText(oldLine);
-        String newText = lineText(newLine);
-
-        int[] oldChars = oldText.codePoints().toArray();
-        int[] newChars = newText.codePoints().toArray();
-
-        List<CharEdit> edits = characterDiff(oldChars, newChars);
-        return changedRanges(edits);
-    }
-
-    static void printHighlights(List<Edit> edits) throws IOException {
-        BufferedOutputStream out =new BufferedOutputStream(System.out, 64 * 1024);
-        int i = 0;
-        while (i < edits.size()) {
-            if (edits.get(i).type == KEEP) {
-                writeLine(out, (byte) ' ', edits.get(i).line);
-                i++;
-                continue;
-            }
-            int start = i;
-            while (i < edits.size() && edits.get(i).type != KEEP) {
-                i++;
-            }
-            int end = i;
-            List<Line> deleted = new ArrayList<>();
-            List<Line> inserted = new ArrayList<>();
-            for (int j = start; j < end; j++) {
-                Edit edit = edits.get(j);
-                if (edit.type == DELETE) {
-                    deleted.add(edit.line);
-                } else {
-                    inserted.add(edit.line);
-                }
-            }
-
-            int pairs = Math.min(deleted.size(), inserted.size());
-            for (int j = 0; j < deleted.size(); j++) {
-                writeLine(out, (byte) '-', deleted.get(j));
-            }
-            for (int j = 0; j < inserted.size(); j++) {
-                writeLine(out, (byte) '+', inserted.get(j));
-
-                if (j < pairs) {
-                    String ranges =highlightFor(deleted.get(j),inserted.get(j));
-                    out.write('?');
-                    out.write(' ');
-                    out.write(ranges.getBytes(StandardCharsets.UTF_8));
-                    out.write('\n');
-                }
-            }
-        }
-
-        out.flush();
-    }
-
-    public static void main(String[] args) {
+    public static void main(String[] args) throws IOException {
         if (args.length != 3 || !(args[0].equals("lines") || args[0].equals("highlight"))) {
             System.err.println("usage: Main lines|highlight A_PATH B_PATH");
             System.exit(2);
         }
-
-        String command = args[0];
-        String oldPath = args[1];
-        String newPath = args[2];
-
+        byte[] da, db;
         try {
-            byte[] oldBytes = readFile(oldPath);
-            byte[] newBytes = readFile(newPath);
-
-            List<Line> oldLines = splitLines(oldBytes);
-            List<Line> newLines = splitLines(newBytes);
-
-            List<Edit> edits = lineDiff(oldLines, newLines);
-
-            edits = orderChanges(edits);
-
-            if (command.equals("lines")) {
-                printLines(edits);
-            } else {
-                printHighlights(edits);
-            }
-        } catch (IOException e) {
+            da = Files.readAllBytes(Path.of(args[1]));
+            db = Files.readAllBytes(Path.of(args[2]));
+        } catch (IOException | RuntimeException e) {
             System.err.println("Could not read input file");
             System.exit(2);
+            return;
         }
+        boolean highlight = args[0].equals("highlight");
+        Map<String, Integer> ids = new HashMap<>();
+        Lines a = new Lines(da, ids), b = new Lines(db, ids);
+        boolean[][] r = lineDiff(a.id, b.id, ids.size());
+        ids = null;
+        boolean[] dl = r[0], in = r[1];
+
+        OutputStream out = new BufferedOutputStream(new FileOutputStream(FileDescriptor.out), 1 << 16);
+        int i = 0, j = 0;
+        while (i < a.n || j < b.n) {
+            if (i < a.n && j < b.n && !dl[i] && !in[j]) {   // keep line
+                a.write(out, ' ', i++);
+                j++;
+                continue;
+            }
+            int i0 = i, j0 = j;                              // change block: all '-' then all '+'
+            while (i < a.n && dl[i]) i++;
+            while (j < b.n && in[j]) j++;
+            for (int p = i0; p < i; p++) a.write(out, '-', p);
+            for (int q = j0; q < j; q++) {
+                b.write(out, '+', q);
+                int p = i0 + (q - j0);                        // paired '-' line
+                if (highlight && p < i) {
+                    boolean[][] c = diff(a.codePoints(p), b.codePoints(q));
+                    out.write(("? " + ranges(c[0]) + " | " + ranges(c[1]) + "\n").getBytes(StandardCharsets.UTF_8));
+                }
+            }
+        }
+        out.flush();
     }
 }
-
